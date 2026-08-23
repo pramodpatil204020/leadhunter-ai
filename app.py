@@ -1,104 +1,76 @@
-import streamlit as st
-import pandas as pd
+import os,re
 from datetime import datetime
-
-st.set_page_config(page_title="LeadHunter AI", page_icon="🏠", layout="wide")
-
-if "leads" not in st.session_state:
-    st.session_state.leads = []
-
-def score_lead(budget, area, property_type, timeline, possession, phone):
-    score = 10
-    if budget: score += 20
-    if area: score += 15
-    if property_type: score += 15
-    if possession: score += 10
-    if phone: score += 10
-    if timeline == "Within 1 month": score += 20
-    elif timeline == "1–3 months": score += 12
-    elif timeline == "3–6 months": score += 6
-    return min(score, 100)
-
-def temperature(score):
-    if score >= 80: return "🔥 HOT"
-    if score >= 55: return "🟠 WARM"
-    return "⚪ COLD"
-
-st.title("🏠 LeadHunter AI")
-st.caption("Real-estate lead qualification demo — prototype only")
-
-tab1, tab2, tab3 = st.tabs(["Buyer Demo", "Broker Dashboard", "How it works"])
-
-with tab1:
-    st.subheader("Qualify a new property enquiry")
-    c1, c2 = st.columns(2)
+import pandas as pd
+import streamlit as st
+st.set_page_config(page_title="LeadHunter AI v2",page_icon="🏠",layout="wide")
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI=None
+def key():
+    try:return st.secrets["OPENAI_API_KEY"]
+    except Exception:return os.getenv("OPENAI_API_KEY")
+def extract(t):
+    x=t.lower(); d={"property_type":"","budget":"","area":"","possession":"","timeline":"Just exploring"}
+    for p in ["1 bhk","2 bhk","3 bhk","4 bhk","plot","commercial"]:
+        if p in x:d["property_type"]=p.upper();break
+    m=re.search(r"(?:₹|rs\.?|inr)?\s*([0-9]+(?:\.[0-9]+)?)\s*(lakh|lac|crore|cr)",x)
+    if m:d["budget"]=f"₹{m.group(1)} {m.group(2)}"
+    for a in ["cidco","vazirabad","taroda","shivaji nagar","airport road","miyapur","hafeezpet"]:
+        if a in x:d["area"]=a.title();break
+    if "ready" in x:d["possession"]="Ready to move"
+    elif "under construction" in x:d["possession"]="Under construction"
+    if "within 1 month" in x or "this month" in x or "urgent" in x:d["timeline"]="Within 1 month"
+    elif "1-3 month" in x or "2 month" in x or "3 month" in x:d["timeline"]="1–3 months"
+    elif "6 month" in x:d["timeline"]="3–6 months"
+    return d
+def score(d):
+    s=10+20*bool(d["budget"])+15*bool(d["area"])+15*bool(d["property_type"])+10*bool(d["possession"])
+    s+=20 if d["timeline"]=="Within 1 month" else 12 if d["timeline"]=="1–3 months" else 6 if d["timeline"]=="3–6 months" else 0
+    return min(s,100)
+def temp(s):return "🔥 HOT" if s>=80 else "🟠 WARM" if s>=55 else "⚪ COLD"
+def reply(msg,hist):
+    if key() and OpenAI:
+        c=OpenAI(api_key=key())
+        r=c.responses.create(model="gpt-5.6-luna",instructions="""You are LeadHunter AI, a concise real-estate lead qualifier. Collect property type, budget, area, possession preference and purchase timeline. Ask at most 2 short questions. Never invent property availability, prices or promises. Return only the customer-facing reply.""",input=hist+[{"role":"user","content":msg}])
+        return r.output_text
+    d=extract(msg); missing=[]
+    if not d["property_type"]:missing.append("property type")
+    if not d["budget"]:missing.append("budget")
+    if not d["area"]:missing.append("preferred area")
+    if not d["possession"]:missing.append("ready-to-move or under-construction")
+    if missing:return "Thanks! 👍 Could you tell me your "+ " and ".join(missing[:2])+"?"
+    return f"Great — {d['property_type']} around {d['budget']} in {d['area']}. Are you looking to purchase {d['timeline'].lower()}?"
+if "leads" not in st.session_state:st.session_state.leads=[]
+if "chat" not in st.session_state:st.session_state.chat=[]
+st.title("🏠 LeadHunter AI v2");st.caption("Conversational real-estate lead qualification — prototype")
+t1,t2,t3=st.tabs(["💬 Buyer Chat","📊 Broker Dashboard","⚙️ Setup"])
+with t1:
+    st.subheader("Talk naturally — no form required")
+    for m in st.session_state.chat:
+        with st.chat_message(m["role"]):st.write(m["content"])
+    p=st.chat_input("Example: I need a 2 BHK in CIDCO around ₹45 lakh")
+    if p:
+        st.session_state.chat += [{"role":"user","content":p},{"role":"assistant","content":reply(p,st.session_state.chat)}]
+        st.rerun()
+    c1,c2=st.columns(2)
     with c1:
-        name = st.text_input("Buyer name", placeholder="Rahul")
-        phone = st.text_input("Phone / WhatsApp", placeholder="98XXXXXXXX")
-        property_type = st.selectbox("Requirement", ["", "1 BHK", "2 BHK", "3 BHK", "Plot", "Commercial"])
-        budget = st.text_input("Budget", placeholder="₹45 lakh")
+        if st.button("Save conversation as lead",use_container_width=True):
+            text=" ".join(m["content"] for m in st.session_state.chat if m["role"]=="user");d=extract(text);s=score(d)
+            st.session_state.leads.append({"Time":datetime.now().strftime("%d-%m-%Y %H:%M"),**d,"Score":s,"Status":temp(s),"Conversation":text})
+            st.success(f"Saved — {temp(s)} ({s}/100)")
+            if s>=80:st.error("🔥 BROKER ALERT: High-priority lead. Call quickly.")
     with c2:
-        area = st.text_input("Preferred area", placeholder="Vazirabad / CIDCO")
-        possession = st.selectbox("Possession", ["", "Ready to move", "Under construction", "Either"])
-        timeline = st.selectbox("Purchase timeline", ["Just exploring", "3–6 months", "1–3 months", "Within 1 month"])
-        source = st.selectbox("Lead source", ["WhatsApp", "Website", "Phone", "Property portal", "Walk-in"])
-
-    score = score_lead(budget, area, property_type, timeline, possession, phone)
-    st.metric("Live lead score", f"{score}/100", temperature(score))
-
-    if st.button("Qualify & save lead", type="primary", use_container_width=True):
-        lead = {
-            "Time": datetime.now().strftime("%d-%m-%Y %H:%M"),
-            "Name": name or "Unknown",
-            "Phone": phone,
-            "Requirement": property_type,
-            "Budget": budget,
-            "Area": area,
-            "Possession": possession,
-            "Timeline": timeline,
-            "Source": source,
-            "Score": score,
-            "Status": temperature(score),
-        }
-        st.session_state.leads.append(lead)
-        st.success(f"Lead saved: {temperature(score)} — {score}/100")
-        if score >= 80:
-            st.error(f"🔥 BROKER ALERT: Call {lead['Name']} quickly. {property_type}, {budget}, {area}, {timeline}.")
-        elif score >= 55:
-            st.warning("🟠 Follow up soon and clarify remaining buying criteria.")
-        else:
-            st.info("⚪ Keep in nurture list; avoid spending too much broker time yet.")
-
-with tab2:
+        if st.button("Clear chat",use_container_width=True):st.session_state.chat=[];st.rerun()
+with t2:
     st.subheader("Broker Dashboard")
     if st.session_state.leads:
-        df = pd.DataFrame(st.session_state.leads).sort_values("Score", ascending=False)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        hot = (df["Score"] >= 80).sum()
-        warm = ((df["Score"] >= 55) & (df["Score"] < 80)).sum()
-        cold = (df["Score"] < 55).sum()
-        a,b,c,d = st.columns(4)
-        a.metric("Total", len(df))
-        b.metric("Hot", int(hot))
-        c.metric("Warm", int(warm))
-        d.metric("Cold", int(cold))
-        st.download_button("Download leads CSV", df.to_csv(index=False).encode("utf-8"), "leads.csv", "text/csv")
-    else:
-        st.info("No leads yet. Add one in Buyer Demo.")
-
-with tab3:
-    st.subheader("Prototype workflow")
-    st.code("""Buyer enquiry
-      ↓
-Collect requirement, budget, area & timeline
-      ↓
-Score 0–100
-      ↓
-HOT / WARM / COLD
-      ↓
-Save to broker dashboard
-      ↓
-Alert broker for HOT leads
-      ↓
-Future version: AI chat + WhatsApp + automated follow-ups""")
-    st.write("This version deliberately uses deterministic scoring, so we can test the business idea before paying for APIs.")
+        df=pd.DataFrame(st.session_state.leads).sort_values("Score",ascending=False);st.dataframe(df,use_container_width=True,hide_index=True)
+        st.download_button("Download CSV",df.to_csv(index=False).encode(),"leadhunter_leads.csv","text/csv")
+    else:st.info("No saved leads yet.")
+with t3:
+    if key():st.success("OpenAI API key detected — AI mode enabled.")
+    else:st.warning("No API key — demo fallback mode is active.")
+    st.write("For real AI, add OPENAI_API_KEY under Streamlit Secrets. Never put an API key in app.py or GitHub.")
+    st.write("OpenAI API usage is billed separately from a ChatGPT subscription.")
+st.divider();st.caption("Prototype only. Verify property availability and prices before communicating them.")
